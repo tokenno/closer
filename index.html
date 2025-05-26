@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GPS Sonar Bleep with MIDI</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      background: #111;
+      color: #0f0;
+      text-align: center;
+      padding: 2em;
+      max-width: 800px;
+      margin: 0 auto;
+    }
+    input, button, select {
+      margin: 0.5em;
+      padding: 0.5em;
+      font-size: 1em;
+      background: #222;
+      color: #0f0;
+      border: 1px solid #0f0;
+      border-radius: 4px;
+    }
+    button {
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    #debug {
+      text-align: left;
+      margin: 20px auto;
+      padding: 10px;
+      border: 1px dashed #0f0;
+      color: #0f0;
+      max-height: 200px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 0.9em;
+    }
+    .warning {
+      color: #ff0;
+      font-weight: bold;
+    }
+    .status {
+      margin: 10px 0;
+      padding: 8px;
+      border-radius: 4px;
+    }
+    .success {
+      background: rgba(0, 255, 0, 0.1);
+      border: 1px solid #0f0;
+    }
+    .error {
+      background: rgba(255, 0, 0, 0.1);
+      border: 1px solid #f00;
+    }
+    .panel {
+      border: 1px solid #0f0;
+      border-radius: 8px;
+      padding: 15px;
+      margin: 10px 0;
+    }
+    .control-group {
+      display: flex;
+      justify-content: center;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 10px 0;
+    }
+    .control-item {
+      min-width: 120px;
+    }
+  </style>
+</head>
+<body>
+  <h1>GPS Sonar Bleep with MIDI</h1>
+  <p class="warning">TAP "TEST AUDIO" FIRST! THEN "CONNECT MIDI"</p>
+
+  <div class="panel">
+    <h2>Audio Setup</h2>
+    <div class="control-group">
+      <button id="testBtn">Test Audio</button>
+    </div>
+    <div id="audioStatus" class="status">Audio: Not initialized</div>
+  </div>
+
+  <div class="panel">
+    <h2>MIDI Setup</h2>
+    <div class="control-group">
+      <button id="midiBtn" disabled>Connect MIDI</button>
+      <select id="midiChannel">
+        <option value="0">Channel 1</option>
+        <option value="1">Channel 2</option>
+        <option value="2">Channel 3</option>
+        <option value="3">Channel 4</option>
+      </select>
+    </div>
+    <div id="midiStatus" class="status">MIDI: Not connected</div>
+  </div>
+
+  <div class="panel">
+    <h2>GPS Controls</h2>
+    <div class="control-group">
+      <button id="lockBtn" disabled>Lock Position</button>
+      <button id="stopBtn" disabled>Stop</button>
+    </div>
+    <div id="gpsStatus" class="status">GPS: Ready</div>
+  </div>
+
+  <div class="panel">
+    <h2>Parameters</h2>
+    <div class="control-group">
+      <div class="control-item">
+        <label for="freqInput">Bleep Freq (Hz)</label><br>
+        <input type="number" id="freqInput" value="800" min="20" max="20000" />
+      </div>
+      <div class="control-item">
+        <label for="maxDistInput">Max Distance (m)</label><br>
+        <input type="number" id="maxDistInput" value="50" min="1" />
+      </div>
+      <div class="control-item">
+        <label for="responseSpeed">Response Speed</label><br>
+        <input type="range" id="responseSpeed" min="1" max="10" value="7" />
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>MIDI Mapping</h2>
+    <div class="control-group">
+      <div class="control-item">
+        <label for="distanceCC">Distance CC#</label><br>
+        <input type="number" id="distanceCC" value="20" min="0" max="127" />
+      </div>
+      <div class="control-item">
+        <label for="tempoCC">Tempo CC#</label><br>
+        <input type="number" id="tempoCC" value="21" min="0" max="127" />
+      </div>
+      <div class="control-item">
+        <label for="noteNumber">Trigger Note</label><br>
+        <input type="number" id="noteNumber" value="60" min="0" max="127" />
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Data Output</h2>
+    <div class="control-group">
+      <div class="control-item">
+        <label>Distance</label><br>
+        <span id="distance">--</span> m
+      </div>
+      <div class="control-item">
+        <label>Accuracy</label><br>
+        <span id="accuracy">--</span> m
+      </div>
+      <div class="control-item">
+        <label>BPM</label><br>
+        <span id="bleepRate">--</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="debug"></div>
+
+  <script>
+    class MIDIController {
+      constructor() {
+        this.midiAccess = null;
+        this.output = null;
+        this.channel = 0;
+      }
+
+      async init() {
+        try {
+          if (!navigator.requestMIDIAccess) {
+            throw new Error("Web MIDI not supported in this browser");
+          }
+          
+          this.midiAccess = await navigator.requestMIDIAccess();
+          const outputs = this.midiAccess.outputs.values();
+          
+          for (const output of outputs) {
+            this.output = output;
+            console.log("MIDI output connected:", output.name);
+            break;
+          }
+          
+          return this.output !== null;
+        } catch (err) {
+          console.error("MIDI initialization failed:", err);
+          return false;
+        }
+      }
+
+      sendCC(controller, value) {
+        if (!this.output) return;
+        value = Math.max(0, Math.min(127, Math.floor(value)));
+        this.output.send([176 + this.channel, controller, value]);
+      }
+
+      sendNote(note, velocity = 127, duration = 100) {
+        if (!this.output) return;
+        note = Math.max(0, Math.min(127, note));
+        velocity = Math.max(0, Math.min(127, velocity));
+        
+        this.output.send([144 + this.channel, note, velocity]);
+        if (duration > 0) {
+          setTimeout(() => {
+            this.output.send([128 + this.channel, note, 0]);
+          }, duration);
+        }
+      }
+    }
+
+    const SonarBleep = {
+      audioCtx: null,
+      midi: new MIDIController(),
+      watchId: null,
+      bleepTimer: null,
+      lockPosition: null,
+      lastUpdateTime: Date.now(),
+      lastBleedTime: 0,
+      isAudioAllowed: false,
+      isActive: false,
+      movementHistory: [],
+      currentTempo: 1000,
+      responseFactor: 7,
+      debugMode: true,
+
+      init: async function() {
+        this.setupEventListeners();
+        this.updateUI();
+        this.log("System initialized. Test audio first, then connect MIDI.");
+      },
+
+      setupEventListeners: function() {
+        // Audio test button
+        document.getElementById("testBtn").addEventListener("click", () => {
+          this.initAudio();
+          this.playTestSound();
+        });
+
+        // MIDI connection button
+        document.getElementById("midiBtn").addEventListener("click", async () => {
+          const connected = await this.midi.init();
+          this.midi.channel = parseInt(document.getElementById("midiChannel").value);
+          
+          const statusEl = document.getElementById("midiStatus");
+          if (connected) {
+            statusEl.textContent = `MIDI: Connected to ${this.midi.output.name}`;
+            statusEl.className = "status success";
+          } else {
+            statusEl.textContent = "MIDI: Connection failed (check browser permissions)";
+            statusEl.className = "status error";
+          }
+          
+          this.updateUI();
+        });
+
+        // MIDI channel selection
+        document.getElementById("midiChannel").addEventListener("change", (e) => {
+          this.midi.channel = parseInt(e.target.value);
+        });
+
+        // Lock position button
+        document.getElementById("lockBtn").addEventListener("click", () => {
+          this.lockCurrentPosition();
+        });
+
+        // Stop button
+        document.getElementById("stopBtn").addEventListener("click", () => {
+          this.stop();
+        });
+
+        // Parameter controls
+        document.getElementById("responseSpeed").addEventListener("input", (e) => {
+          this.responseFactor = parseInt(e.target.value);
+        });
+      },
+
+      initAudio: function() {
+        if (this.audioCtx) return;
+        
+        try {
+          this.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          document.getElementById("audioStatus").textContent = "Audio: Initialized";
+          document.getElementById("audioStatus").className = "status success";
+          document.getElementById("midiBtn").disabled = false;
+          this.log("Audio system initialized");
+        } catch (e) {
+          document.getElementById("audioStatus").textContent = `Audio: ${e.message}`;
+          document.getElementById("audioStatus").className = "status error";
+          this.log(`Audio init error: ${e.message}`, true);
+        }
+      },
+
+      playTestSound: function() {
+        if (!this.audioCtx) {
+          this.log("Audio context not ready", true);
+          return;
+        }
+        
+        try {
+          const now = this.audioCtx.currentTime;
+          const osc = this.audioCtx.createOscillator();
+          const gain = this.audioCtx.createGain();
+          
+          osc.type = 'sine';
+          osc.frequency.value = 800;
+          osc.connect(gain);
+          gain.connect(this.audioCtx.destination);
+          
+          gain.gain.setValueAtTime(0, now);
+          gain.gain.linearRampToValueAtTime(1, now + 0.01);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+          
+          osc.start(now);
+          osc.stop(now + 0.1);
+          
+          this.isAudioAllowed = true;
+          document.getElementById("audioStatus").textContent = "Audio: Working!";
+          document.getElementById("audioStatus").className = "status success";
+          document.getElementById("lockBtn").disabled = false;
+          this.log("Test sound played successfully - audio is enabled");
+        } catch (e) {
+          document.getElementById("audioStatus").textContent = `Audio: ${e.message}`;
+          document.getElementById("audioStatus").className = "status error";
+          this.log(`Test sound failed: ${e.message}`, true);
+        }
+      },
+
+      lockCurrentPosition: function() {
+        if (!navigator.geolocation) {
+          this.updateGpsStatus("Geolocation not supported", true);
+          return;
+        }
+
+        this.updateGpsStatus("Getting position...");
+        
+        navigator.geolocation.getCurrentPosition(
+          pos => {
+            this.lockPosition = {
+              lat: pos.coords.latitude,
+              lon: pos.coords.longitude,
+              accuracy: pos.coords.accuracy
+            };
+            this.updateGpsStatus(`Position locked! (Accuracy: ${this.lockPosition.accuracy.toFixed(1)}m)`);
+            this.isActive = true;
+            this.startPositionWatch();
+            this.updateUI();
+          },
+          err => {
+            let errorMsg = `Error: ${err.message}`;
+            if (err.code === err.PERMISSION_DENIED) {
+              errorMsg = "Permission denied. Enable location services.";
+            } else if (err.code === err.TIMEOUT) {
+              errorMsg = "Timeout. Ensure GPS is enabled.";
+            } else if (err.code === err.POSITION_UNAVAILABLE) {
+              errorMsg = "Position unavailable. Try moving to open area.";
+            }
+            this.updateGpsStatus(errorMsg, true);
+            this.log(`GPS error: ${err.code} - ${err.message}`, true);
+          },
+          { 
+            enableHighAccuracy: true, 
+            timeout: 10000,
+            maximumAge: 0
+          }
+        );
+      },
+
+      startPositionWatch: function() {
+        if (this.watchId) {
+          navigator.geolocation.clearWatch(this.watchId);
+        }
+        
+        this.watchId = navigator.geolocation.watchPosition(
+          pos => this.handlePositionUpdate(pos),
+          err => {
+            this.updateGpsStatus(`GPS error: ${err.message}`, true);
+          },
+          { 
+            enableHighAccuracy: true,
+            maximumAge: 0,
+            timeout: 15000
+          }
+        );
+      },
+
+      handlePositionUpdate: function(pos) {
+        const now = Date.now();
+        this.lastUpdateTime = now;
+        
+        if (!this.lockPosition || !this.isActive) return;
+
+        const { latitude, longitude, accuracy, speed } = pos.coords;
+        const distance = this.calculateDistance(latitude, longitude, this.lockPosition.lat, this.lockPosition.lon);
+        
+        // Store movement data for smoothing
+        this.movementHistory.push({
+          time: now,
+          distance,
+          speed: speed || 0
+        });
+        
+        // Keep only recent history (last 3 seconds)
+        this.movementHistory = this.movementHistory.filter(item => now - item.time < 3000);
+        
+        this.updateDisplay(distance, accuracy, speed);
+        this.updateAudioAndMIDI(distance);
+      },
+
+      calculateDistance: function(lat1, lon1, lat2, lon2) {
+        const R = 6371e3;
+        const φ1 = lat1 * Math.PI/180;
+        const φ2 = lat2 * Math.PI/180;
+        const Δφ = (lat2-lat1) * Math.PI/180;
+        const Δλ = (lon2-lon1) * Math.PI/180;
+
+        const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+                  Math.cos(φ1) * Math.cos(φ2) *
+                  Math.sin(Δλ/2) * Math.sin(Δλ/2);
+        const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+
+        return R * c;
+      },
+
+      updateAudioAndMIDI: function(currentDistance) {
+        clearTimeout(this.bleepTimer);
+        
+        const maxDist = this.getValidMaxDistance();
+        const freq = this.getValidFrequency();
+        const normalizedDist = Math.min(currentDistance, maxDist);
+        
+        // Calculate dynamic tempo based on movement speed and distance
+        const avgSpeed = this.movementHistory.length > 0 ? 
+          this.movementHistory.reduce((sum, item) => sum + item.speed, 0) / this.movementHistory.length : 0;
+        
+        // Dynamic response based on speed and distance
+        const speedFactor = Math.min(10, Math.max(1, 1 + (avgSpeed * 3)));
+        const distanceFactor = normalizedDist / maxDist;
+        
+        // Calculate tempo with faster response to changes
+        const baseTempo = 50 + (1000 * distanceFactor);
+        const dynamicTempo = baseTempo / (speedFactor * (this.responseFactor / 5));
+        
+        this.currentTempo = dynamicTempo;
+        const bpm = Math.round(60000 / dynamicTempo);
+        document.getElementById("bleepRate").textContent = bpm;
+        
+        // Convert values to MIDI range (0-127)
+        const midiDistance = 127 * (1 - (normalizedDist / maxDist)); // Inverted so closer = higher value
+        const midiTempo = 127 * (1 - (dynamicTempo/1050)); // Higher value = faster tempo
+        
+        // Send MIDI messages
+        const distanceCC = parseInt(document.getElementById("distanceCC").value);
+        const tempoCC = parseInt(document.getElementById("tempoCC").value);
+        const noteNumber = parseInt(document.getElementById("noteNumber").value);
+        
+        this.midi.sendCC(distanceCC, midiDistance);
+        this.midi.sendCC(tempoCC, midiTempo);
+        this.midi.sendNote(noteNumber, 127, 100);
+        
+        // Play audio bleep
+        this.playBleep(freq);
+        
+        // Schedule next update
+        this.bleepTimer = setTimeout(() => {
+          this.updateAudioAndMIDI(currentDistance);
+        }, dynamicTempo);
+      },
+
+      playBleep: function(frequency) {
+        if (!this.audioCtx || !this.isAudioAllowed) return;
+        
+        try {
+          const now = this.audioCtx.currentTime;
+          const osc = this.audioCtx.createOscillator();
+          const gain = this.audioCtx.createGain();
+          
+          osc.type = 'sine';
+          osc.frequency.value = frequency;
+          osc.connect(gain);
+          gain.connect(this.audioCtx.destination);
+          
+          gain.gain.setValueAtTime(0, now);
+          gain.gain.linearRampToValueAtTime(1, now + 0.01);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+          
+          osc.start(now);
+          osc.stop(now + 0.1);
+        } catch (e) {
+          this.log(`Beep error: ${e.message}`, true);
+        }
+      },
+
+      stop: function() {
+        clearTimeout(this.bleepTimer);
+        if (this.watchId) {
+          navigator.geolocation.clearWatch(this.watchId);
+          this.watchId = null;
+        }
+        this.isActive = false;
+        this.updateGpsStatus("Stopped");
+        this.updateUI();
+      },
+
+      updateDisplay: function(distance, accuracy, speed) {
+        document.getElementById("distance").textContent = distance.toFixed(1);
+        document.getElementById("accuracy").textContent = accuracy ? accuracy.toFixed(1) : '--';
+      },
+
+      updateGpsStatus: function(message, isError = false) {
+        const statusEl = document.getElementById("gpsStatus");
+        statusEl.textContent = `GPS: ${message}`;
+        statusEl.className = isError ? "status error" : "status";
+      },
+
+      updateUI: function() {
+        document.getElementById("lockBtn").disabled = !this.isAudioAllowed || this.isActive;
+        document.getElementById("stopBtn").disabled = !this.isActive;
+      },
+
+      getValidFrequency: function() {
+        const freq = parseFloat(document.getElementById("freqInput").value);
+        return Math.min(20000, Math.max(20, isNaN(freq) ? 800 : freq));
+      },
+
+      getValidMaxDistance: function() {
+        const dist = parseFloat(document.getElementById("maxDistInput").value);
+        return Math.max(1, isNaN(dist) ? 50 : dist);
+      },
+
+      log: function(message, isError = false) {
+        if (!this.debugMode) return;
+        const debugEl = document.getElementById("debug");
+        const entry = document.createElement('div');
+        entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+        entry.style.color = isError ? '#f00' : '#0f0';
+        debugEl.prepend(entry);
+        
+        if (debugEl.children.length > 20) {
+          debugEl.removeChild(debugEl.lastChild);
+        }
+      }
+    };
+
+    // Initialize when page loads
+    document.addEventListener('DOMContentLoaded', () => {
+      SonarBleep.init();
+      
+      // Add warning for mobile browsers
+      if (/Mobi|Android/i.test(navigator.userAgent)) {
+        SonarBleep.log("MOBILE DETECTED: Tap 'Test Audio' first to unlock sound", false);
+      }
+    });
+  </script>
+</body>
+</html>
